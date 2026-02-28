@@ -1,3 +1,4 @@
 <resources>
-    <string name="app_name">AR麻将助手</string>
+    <string name="app_name">麻将助手</string>
+    <string name="accessibility_service_description">此服务用于获取屏幕内容，以便为您提供游戏辅助。它不会收集或分享您的任何个人数据。</string>
 </resources>

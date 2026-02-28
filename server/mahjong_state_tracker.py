@@ -275,7 +275,7 @@ class MahjongStateTracker:
         # Calculate raw difference
         len_diff = len(new_hand) - len(old_hand)
         
-        # Use existing _diff_hands logic (implemented inline or reuse helper if strictly needed, 
+        # Use existing _diff_hands logic (implemented inline or reuse helper if strictly needed,
         # but here simple length/content check is enough for Draw/Discard)
         
         # We need to detect ANKAN specifically:
