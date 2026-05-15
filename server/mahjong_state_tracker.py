@@ -22,6 +22,135 @@ class MahjongStateTracker:
         # Index 0-33.
         self.visible_tiles: List[int] = [0] * 34
 
+        # 4-player tracking
+        self.prev_discard_counts: Dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
+        self.prev_meld_counts: Dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
+        self.current_turn: int = 0
+        self.last_discarder: int = -1
+
+    def detect_turn(self, players_mpsz: Dict[int, Dict[str, List[str]]]) -> Dict[str, Any]:
+        """
+        Detect current turn based on self's tile count + frame diff on river/melds.
+
+        Args:
+            players_mpsz: {seat: {'hand': [...], 'melds': [...], 'discards': [...]}}
+
+        Returns:
+            {'current_turn': int, 'turn_label': str, 'last_discarder': int}
+        """
+        # 1. Self tile count check (highest priority)
+        self_hand = players_mpsz.get(0, {}).get('hand', [])
+        self_melds = players_mpsz.get(0, {}).get('melds', [])
+
+        try:
+            hand_136 = self._normalize_hand(self_hand)
+            melds_136 = self._normalize_hand(self_melds)
+            total = len(hand_136) + len(melds_136)
+
+            if total % 3 == 2:
+                self.current_turn = 0
+                self._update_prev_counts(players_mpsz)
+                return {
+                    'current_turn': 0,
+                    'turn_label': '自家出牌',
+                    'last_discarder': self.last_discarder
+                }
+        except Exception:
+            pass
+
+        # 2. Frame diff: which player's discards/melds changed
+        detected_turn = -1
+        for seat in range(4):
+            curr_discards = len(players_mpsz.get(seat, {}).get('discards', []))
+            curr_melds = len(players_mpsz.get(seat, {}).get('melds', []))
+            prev_d = self.prev_discard_counts.get(seat, 0)
+            prev_m = self.prev_meld_counts.get(seat, 0)
+
+            if curr_discards > prev_d:
+                self.last_discarder = seat
+                # Next player in counter-clockwise order
+                detected_turn = (seat + 1) % 4
+            elif curr_melds > prev_m:
+                self.last_discarder = -1
+                # Meld happened - assume it affected self's options
+                detected_turn = 0
+
+        if detected_turn >= 0:
+            self.current_turn = detected_turn
+
+        # 3. Update previous counts
+        self._update_prev_counts(players_mpsz)
+
+        turn_names = {0: '自家', 1: '下家', 2: '对家', 3: '上家'}
+        turn_label = turn_names.get(self.current_turn, '未知')
+        if self.current_turn == 0:
+            turn_label += '出牌' if self._is_self_turn(players_mpsz) else '回应'
+        else:
+            turn_label += '出牌中'
+
+        return {
+            'current_turn': self.current_turn,
+            'turn_label': turn_label,
+            'last_discarder': self.last_discarder
+        }
+
+    def _is_self_turn(self, players_mpsz: Dict[int, Dict]) -> bool:
+        self_hand = players_mpsz.get(0, {}).get('hand', [])
+        self_melds = players_mpsz.get(0, {}).get('melds', [])
+        try:
+            hand_136 = self._normalize_hand(self_hand)
+            melds_136 = self._normalize_hand(self_melds)
+            total = len(hand_136) + len(melds_136)
+            return total % 3 == 2
+        except Exception:
+            return False
+
+    def _update_prev_counts(self, players_mpsz: Dict[int, Dict]):
+        for seat in range(4):
+            self.prev_discard_counts[seat] = len(players_mpsz.get(seat, {}).get('discards', []))
+            self.prev_meld_counts[seat] = len(players_mpsz.get(seat, {}).get('melds', []))
+
+    def sync_all_visible_tiles(self, players_mpsz: Dict[int, Dict[str, List[str]]]) -> Dict[str, Any]:
+        """
+        Rebuild visible_tiles from all 4 players' discards + all melds.
+        Full rebuild each frame to avoid cumulative drift.
+        """
+        new_visible = [0] * 34
+
+        # All players' discards are visible
+        for seat in range(4):
+            for tile_str in players_mpsz.get(seat, {}).get('discards', []):
+                try:
+                    ids = TilesConverter.one_line_string_to_136_array(tile_str)
+                    if ids:
+                        idx34 = ids[0] // 4
+                        if 0 <= idx34 < 34:
+                            new_visible[idx34] += 1
+                except Exception:
+                    pass
+
+        # All players' melds are visible
+        for seat in range(4):
+            for tile_str in players_mpsz.get(seat, {}).get('melds', []):
+                try:
+                    ids = TilesConverter.one_line_string_to_136_array(tile_str)
+                    if ids:
+                        idx34 = ids[0] // 4
+                        if 0 <= idx34 < 34:
+                            new_visible[idx34] += 1
+                except Exception:
+                    pass
+
+        old_total = sum(self.visible_tiles)
+        self.visible_tiles = new_visible
+        new_total = sum(new_visible)
+
+        return {
+            'old_count': old_total,
+            'new_count': new_total,
+            'delta': new_total - old_total
+        }
+
     def update_visible_tiles(self, events: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Update visible tiles based on external events (e.g. from voice analysis).

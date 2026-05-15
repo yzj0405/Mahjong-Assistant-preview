@@ -18,8 +18,9 @@ class STTService:
             try:
                 # Initialize WhisperModel with CPU and int8 quantization
                 # User requested: CPU version, int8
-                self._model = WhisperModel(model, device="cpu", compute_type="int8")
-                
+                # self._model = WhisperModel(model, device="cpu", compute_type="int8")
+                self._model = WhisperModel(model, device="cuda", compute_type="float32")
+
                 # Wrap with BatchedInferencePipeline for batch_size=8
                 self.batched_model = BatchedInferencePipeline(model=self._model)
                 self.language = language

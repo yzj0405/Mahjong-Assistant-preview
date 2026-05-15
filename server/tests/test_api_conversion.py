@@ -2,7 +2,7 @@ import requests
 import os
 
 API_URL = "http://localhost:8000/api/analyze-hand"
-IMAGE_PATH = "static/uploads/3a6b35ba-213b-40da-8566-13ce7e15a9ac_1768273293616.jpg"
+IMAGE_PATH = "static/uploads/debug_1778813124490.jpg"
 SESSION_ID = "test_conversion_session"
 
 def test_api():

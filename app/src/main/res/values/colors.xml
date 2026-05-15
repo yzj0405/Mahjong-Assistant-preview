@@ -7,4 +7,9 @@
     <color name="bright_blue">#00BFFF</color>
     <color name="red">#FF0000</color>
     <color name="transparent">#00000000</color>
+    
+    <!-- 新增颜色 -->
+    <color name="success_green">#4CAF50</color>
+    <color name="error_red">#FF5252</color>
+    <color name="gold">#FFD700</color>
 </resources>

@@ -21,6 +21,7 @@ from vision_service import VisionService, draw_bounding_boxes
 from schemas import (
     StartSessionRequest, 
     AnalyzeResponse, 
+    PlayerData,
     EndSessionRequest, 
     ProcessAudioResponse
 )
@@ -99,17 +100,49 @@ def convert_to_mpsz(yolo_classes: List[str]):
     for cls in yolo_classes:
         mpsz = YOLO_TO_MPSZ_MAPPING.get(cls)
         if mpsz:
-            # Check if it is a bonus tile (starts with 'f' or 's' followed by digit)
             if mpsz.startswith('f') or mpsz.startswith('s'):
                 bonus_tiles.append(mpsz)
             else:
                 hand_tiles.append(mpsz)
         else:
-            # Keep original if unknown, or maybe ignore? 
-            # For now keeping it to be safe, but logging might be good.
             hand_tiles.append(cls)
             
     return hand_tiles, bonus_tiles
+
+
+def _infer_region(
+    image_path: str,
+    region: List[float],
+    vision_service: VisionService,
+    base_path: str,
+    region_name: str
+) -> List[Dict[str, Any]]:
+    """
+    Crop a region from an image and run YOLO inference.
+    Returns predictions with coordinates adjusted to full-image space.
+    """
+    x1f, y1f, x2f, y2f = region
+
+    with Image.open(image_path) as img:
+        width, height = img.size
+        x1 = int(width * x1f)
+        y1 = int(height * y1f)
+        x2 = int(width * x2f)
+        y2 = int(height * y2f)
+        cropped = img.crop((x1, y1, x2, y2))
+        temp_path = f"{base_path}_{region_name}.jpg"
+        cropped.save(temp_path)
+
+    preds = vision_service.detect_objects(temp_path)
+
+    for p in preds:
+        p['x'] = p.get('x', 0) + x1
+        p['y'] = p.get('y', 0) + y1
+
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+
+    return preds
 
 app = FastAPI()
 
@@ -156,7 +189,7 @@ async def analyze_hand(
     
     # Step 1: Initialize
     logger.info(f"Received Analyze request: session_id={session_id}, filename={image.filename}")
-    steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Received request with image: {image.filename}")
+    steps_log.append(f"[{start_time.strftime('%H:%M:%S')}] Received request: {image.filename}")
     
     # Step 2: Ensure Session Exists
     database.create_or_update_session(session_id)
@@ -171,78 +204,62 @@ async def analyze_hand(
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(image.file, buffer)
-        steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Image saved to {file_path}")
+        steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Image saved")
     except Exception as e:
         error_msg = f"Failed to save image: {str(e)}"
         logger.error(error_msg)
         steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] ERROR: {error_msg}")
-        # Continue with mock logic even if save fails, but log it
 
-    # Step 4: Perform Analysis
-    steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting AI analysis...")
+    # Step 4: Multi-Region Inference (9 regions for 4 players)
+    steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting 4-player multi-region analysis...")
     
-    user_hand = []
-    melded_tiles = []
+    players_mpsz: Dict[int, Dict[str, List[str]]] = {
+        0: {'hand': [], 'melds': [], 'discards': []},
+        1: {'hand': [], 'melds': [], 'discards': []},
+        2: {'hand': [], 'melds': [], 'discards': []},
+        3: {'hand': [], 'melds': [], 'discards': []},
+    }
+    all_preds: List[Dict[str, Any]] = []
     annotated_path = None
     
     try:
-        # Split image for dual inference
-        steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Splitting image for dual inference (Hand/Melded)...")
-        
         base_path = os.path.splitext(file_path)[0]
-        top_path = f"{base_path}_top.jpg"
-        bottom_path = f"{base_path}_bottom.jpg"
-        mid_y = 0
         
-        with Image.open(file_path) as img:
-            width, height = img.size
-            mid_y = height // 2
+        for region_name, region_coords in config.IMAGE_LAYOUT.items():
+            seat, field = config.REGION_MAP[region_name]
             
-            top_img = img.crop((0, 0, width, mid_y))
-            bottom_img = img.crop((0, mid_y, width, height))
+            steps_log.append(
+                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                f"Scanning {region_name} -> {config.get_seat_name(seat)}.{field}..."
+            )
             
-            top_img.save(top_path)
-            bottom_img.save(bottom_path)
+            preds = _infer_region(file_path, region_coords, VISION_SERVICE, base_path, region_name)
+            all_preds.extend(preds)
             
-        # 1. Inference Hand (Top)
-        steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Analyzing Hand (Top Half)...")
-        preds_top = VISION_SERVICE.detect_objects(top_path)
-        preds_top.sort(key=lambda p: p.get("x", 0))
-        user_hand, _ = convert_to_mpsz([p["class"] for p in preds_top])
+            tiles, _ = convert_to_mpsz([p["class"] for p in preds])
+            players_mpsz[seat][field] = tiles
         
-        # 2. Inference Melded (Bottom)
-        steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Analyzing Melded (Bottom Half)...")
-        preds_bottom = VISION_SERVICE.detect_objects(bottom_path)
-        
-        # Adjust coordinates for bottom predictions
-        for p in preds_bottom:
-            p['y'] = p.get('y', 0) + mid_y
-            
-        preds_bottom.sort(key=lambda p: p.get("x", 0))
-        melded_tiles, _ = convert_to_mpsz([p["class"] for p in preds_bottom])
-        
-        # 3. Combine and Draw
-        all_preds = preds_top + preds_bottom
-        
+        # Generate annotated image with all predictions
         annotated_filename = f"{session_id}_{timestamp}_annotated.jpg"
         annotated_full_path = os.path.join(UPLOAD_DIR, annotated_filename)
         
         if draw_bounding_boxes(file_path, all_preds, annotated_full_path):
             annotated_path = f"/static/uploads/{annotated_filename}"
-            steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Generated annotated image with combined results")
-            
-        steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Result: Hand={user_hand}, Melded={melded_tiles}")
+            steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Annotated image generated")
         
-        # Cleanup temp files
-        if os.path.exists(top_path): os.remove(top_path)
-        if os.path.exists(bottom_path): os.remove(bottom_path)
+        for seat in range(4):
+            pd = players_mpsz[seat]
+            steps_log.append(
+                f"  {config.get_seat_name(seat)}: "
+                f"hand={len(pd['hand'])}, melds={len(pd['melds'])}, discards={len(pd['discards'])}"
+            )
         
     except Exception as e:
         error_msg = f"Inference/Processing Error: {str(e)}"
         logger.error(error_msg)
         steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {error_msg}")
 
-    # State Tracking & Action Inference
+    # Step 5: State Tracking (self only, for action detection)
     steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Updating state tracker...")
     
     tracker = SESSION_TRACKERS.get(session_id)
@@ -251,7 +268,11 @@ async def analyze_hand(
         SESSION_TRACKERS[session_id] = tracker
         steps_log.append("Created new tracker for session")
 
+    warning_msg = None
     action_detected = "UNKNOWN"
+    user_hand = players_mpsz[0]['hand']
+    melded_tiles = players_mpsz[0]['melds']
+
     try:
         incoming_id = None
         if incoming_tile:
@@ -273,7 +294,20 @@ async def analyze_hand(
         steps_log.append(error_msg)
         warning_msg = f"Internal Error: {e}"
 
-    # Efficiency / Suggestion Logic
+    # Step 6: Sync 4-player visible tiles (full rebuild to avoid drift)
+    sync_result = tracker.sync_all_visible_tiles(players_mpsz)
+    steps_log.append(f"Visible tiles sync: {sync_result['new_count']} total (delta={sync_result['delta']})")
+
+    # Also sync to EfficiencyEngine
+    EFFICIENCY_ENGINE.visible_tiles = list(tracker.visible_tiles)
+
+    # Step 7: Turn Detection
+    turn_result = tracker.detect_turn(players_mpsz)
+    current_turn = turn_result['current_turn']
+    current_turn_label = turn_result['turn_label']
+    steps_log.append(f"Turn detected: {current_turn_label} (seat {current_turn})")
+
+    # Step 8: Efficiency / Suggestion Logic
     steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Analysing optimal move...")
     
     suggested_play = f"Action: {action_detected}"
@@ -284,7 +318,6 @@ async def analyze_hand(
         try:
             if tracker.current_hidden_hand:
                 hidden_count = len(tracker.current_hidden_hand)
-                # Count tiles in melds (each meld object has .tiles list)
                 meld_count = sum(len(m.tiles) for m in tracker.meld_history)
                 total_tiles = hidden_count + meld_count
                 
@@ -309,20 +342,39 @@ async def analyze_hand(
             logger.error(err_msg)
             steps_log.append(err_msg)
 
+    # Step 9: Build 4-player response
+    river_tiles = []
+    for seat in range(4):
+        river_tiles.extend(players_mpsz[seat]['discards'])
+
+    players_response: List[PlayerData] = []
+    for seat in range(4):
+        pd = players_mpsz[seat]
+        players_response.append(PlayerData(
+            seat=seat,
+            wind=config.get_seat_wind(seat),
+            hand=pd['hand'] if seat == 0 else [],
+            melds=pd['melds'],
+            discards=pd['discards']
+        ))
+
     response_data = AnalyzeResponse(
         user_hand=user_hand,
         melded_tiles=melded_tiles,
+        river_tiles=river_tiles,
         suggested_play=suggested_play, 
         annotated_image_path=annotated_path,
         action_detected=action_detected,
         warning=warning_msg,
-        is_stable=(warning_msg is None)
+        is_stable=(warning_msg is None),
+        players=players_response,
+        current_turn=current_turn,
+        current_turn_label=current_turn_label
     )
     
-    steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Analysis complete. Generating response.")
+    steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Analysis complete.")
 
-    # Step 5: Log Interaction to DB
-    # We store the relative path for frontend access
+    # Step 10: Log Interaction to DB
     relative_image_path = f"/static/uploads/{safe_filename}"
     database.log_interaction(
         session_id=session_id,
@@ -484,6 +536,46 @@ async def debug_yolo(
             "conf_threshold": conf_threshold,
             "iou_threshold": iou_threshold
         }
+    }
+
+@app.post("/api/debug/regions")
+async def debug_regions(
+    image: UploadFile = File(...)
+):
+    """Debug endpoint: visualize all layout regions on the uploaded image."""
+    timestamp = int(datetime.datetime.now().timestamp() * 1000)
+    file_extension = os.path.splitext(image.filename)[1] or ".jpg"
+    safe_filename = f"regions_{timestamp}{file_extension}"
+    file_path = os.path.join(UPLOAD_DIR, safe_filename)
+    
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(image.file, buffer)
+    except Exception as e:
+        return {"error": f"Failed to save image: {str(e)}"}
+
+    with Image.open(file_path) as im:
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(im)
+        width, height = im.size
+        
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow', 'pink']
+        
+        for i, (region_name, coords) in enumerate(config.IMAGE_LAYOUT.items()):
+            x1f, y1f, x2f, y2f = coords
+            x1, y1 = int(width * x1f), int(height * y1f)
+            x2, y2 = int(width * x2f), int(height * y2f)
+            color = colors[i % len(colors)]
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+            draw.text((x1 + 4, y1 + 4), region_name, fill=color)
+        
+        annotated_filename = f"regions_{timestamp}_annotated.jpg"
+        annotated_full_path = os.path.join(UPLOAD_DIR, annotated_filename)
+        im.save(annotated_full_path)
+
+    return {
+        "annotated_image_url": f"/static/uploads/{annotated_filename}",
+        "regions": config.IMAGE_LAYOUT
     }
 
 # --- Background Tasks ---
