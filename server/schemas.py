@@ -29,6 +29,10 @@ class AnalyzeResponse(BaseModel):
     action_detected: Optional[str] = None
     warning: Optional[str] = None
     is_stable: bool = True
+    # Structured analysis fields (for mobile client)
+    shanten: int = -1
+    recommend_comb: List[str] = []
+    is_agari: bool = False
     # 4-player extended fields
     players: List[PlayerData] = []
     current_turn: int = -1

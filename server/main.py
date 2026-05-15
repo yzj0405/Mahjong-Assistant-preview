@@ -311,6 +311,9 @@ async def analyze_hand(
     steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Analysing optimal move...")
     
     suggested_play = f"Action: {action_detected}"
+    shanten = -1
+    recommend_comb = []
+    is_agari = False
     
     if warning_msg:
         suggested_play = "请重新拍摄确认"
@@ -328,6 +331,13 @@ async def analyze_hand(
                         tracker.meld_history
                     )
                     suggested_play = format_suggestions(result, "discard")
+                    # Extract structured data for mobile client
+                    if result:
+                        shanten = result.get('shanten', -1)
+                        discard_tile = result.get('discard_tile')
+                        if discard_tile:
+                            recommend_comb = [discard_tile]
+                        is_agari = (shanten == -1)
                 
                 # 13, 10, 7, 4, 1 -> Waiting (Opponent Turn)
                 elif total_tiles % 3 == 1: 
@@ -336,6 +346,10 @@ async def analyze_hand(
                         tracker.meld_history
                     )
                     suggested_play = format_suggestions(result, "opportunity")
+                    # Extract structured data for mobile client
+                    if result:
+                        shanten = result.get('current_shanten', -1)
+                        is_agari = (shanten == -1)
                     
         except Exception as e:
             err_msg = f"Efficiency Engine Error: {e}"
@@ -367,6 +381,9 @@ async def analyze_hand(
         action_detected=action_detected,
         warning=warning_msg,
         is_stable=(warning_msg is None),
+        shanten=shanten,
+        recommend_comb=recommend_comb,
+        is_agari=is_agari,
         players=players_response,
         current_turn=current_turn,
         current_turn_label=current_turn_label
